@@ -293,3 +293,81 @@ vault write auth/kubernetes/role/tokenizer-cg-role \
     policies="default,policy-tokenizer-cg" \
     token_ttl="1h"
 ```
+
+6. Cross-Namespace Communication Details (for Option 1)
+
+This section details how a pod in one namespace (e.g., databolt-dp) communicates with the centralized secrets-broker service in another namespace (e.g., secrets-broker).
+
+A. Service Discovery (K8s DNS)
+
+Kubernetes provides internal DNS-based service discovery. A pod in any namespace can resolve the Service of the broker using its Fully Qualified Domain Name (FQDN).
+
+Broker Service Name: secrets-broker
+
+Broker Namespace: secrets-broker
+
+FQDN: `secrets-broker.secrets-broker.svc.cluster.local`
+
+The DATABOLT pods will be configured (via the SECRETS_BROKER_URL environment variable) to send their API requests to this FQDN. The K8s DNS system will resolve this address to the broker Service's ClusterIP, which then load-balances traffic to the backing broker pods.
+
+B. Network Security (NetworkPolicy)
+
+By default, all pods in a K8s cluster can communicate. However, in a secure environment, NetworkPolicy objects are used to restrict traffic. For this solution to work, we must create policies that explicitly allow the required communication.
+
+Two policies are required:
+
+Broker Ingress Policy: The secrets-broker namespace needs a policy that allows incoming traffic from the DATABOLT-* namespaces.
+
+# secrets-broker-ingress-policy.yaml
+```
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-databolt-ingress
+  namespace: secrets-broker
+spec:
+  podSelector:
+    matchLabels:
+      app: secrets-broker # Selects the broker pods
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              databolt-service: "true" # Allows traffic from any namespace with this label
+      ports:
+        - protocol: TCP
+          port: 8080 # The broker's service port
+```
+
+Client Egress Policy: Each DATABOLT-* namespace needs a policy that allows outgoing traffic to the secrets-broker namespace.
+
+# databolt-dp-egress-policy.yaml
+```
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-broker-egress
+  namespace: databolt-dp # This policy is deployed in *each* client namespace
+spec:
+  podSelector: {} # Apply to all pods in this namespace
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io: metadata.name: secrets-broker # Allows traffic to the broker's namespace
+      ports:
+        - protocol: TCP
+          port: 8080
+    # --- IMPORTANT ---
+    # This policy must also allow egress to K8s DNS (port 53)
+    # or the FQDN cannot be resolved.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+```
