@@ -36,27 +36,27 @@ This ADR explores options for a "secrets-broker" service to facilitate this, act
 
 ```mermaid
 sequenceDiagram
-    participant Pod as Tokenizer Pod (NS: tokenizer-cg)
-    participant BrokerSvc as secrets-broker (NS: broker)
+    participant Pod as Tokenizer Pod [NS: tokenizer-cg]
+    participant BrokerSvc as secrets-broker [NS: broker]
     participant BrokerPod as Broker Pod
     participant Vault as Hashicorp Vault
 
-    Note over Pod,BrokerPod: Pod mounts a projected, audience-bound SA token.
+    Note over Pod,BrokerPod: Pod mounts projected, audience-bound SA token.
     
-    Pod->>+BrokerSvc: POST /api/v1/write/kv/crypto-gen/new<br/>(Header: Auth: Bearer <pod-sa-token>)
+    Pod->>+BrokerSvc: POST /api/v1/write/... (Header: Auth: Bearer <pod-sa-token>)
     BrokerSvc->>+BrokerPod: Forward request
     
-    BrokerPod->>BrokerPod: 1. Inspect token (get 'ns' and 'sa').<br/>2. Check internal policy mapping:<br/>('ns: tokenizer-cg', 'sa: crypto-gen-sa') -> 'vault-role: crypto-gen'
+    BrokerPod->>BrokerPod: 1. Inspect token. 2. Map (ns, sa) to vault-role.
     
-    BrokerPod->>+Vault: POST /v1/auth/kubernetes/login<br/>(role: 'crypto-gen', jwt: <pod-sa-token>)
-    Vault-->>-BrokerPod: { auth: { client_token: 'vault-pod-token', policies: ['crypto-gen-policy'], ... } }
+    BrokerPod->>+Vault: POST /v1/auth/kubernetes/login (role: 'crypto-gen', jwt: <pod-sa-token>)
+    Vault-->>-BrokerPod: { auth: { client_token: 'vault-pod-token' } }
     
-    BrokerPod->>+Vault: POST /v1/kv/crypto-gen/new<br/>(Header: X-Vault-Token: 'vault-pod-token')<br/>(Body: { data: ... })
+    BrokerPod->>+Vault: POST /v1/kv/crypto-gen/new (Header: X-Vault-Token)
     
-    Note over Vault: Vault policy 'crypto-gen-policy' (tied to role) permits this write.
+    Note over Vault: Vault policy [tied to role] permits this write.
     
     Vault-->>-BrokerPod: { 200 OK }
-    BrokerPod-->>-Pod: { status: "written", path: "..." }
+    BrokerPod-->>-Pod: { status: "written" }
 ```
 
 #### Analysis
@@ -66,7 +66,7 @@ sequenceDiagram
 - **Excellent Security:** The broker itself is not privileged in Vault. It only proxies auth. All permissions are enforced by Vault policies, which are mapped 1:1 with K8s ServiceAccounts. This is true "least privilege."
 - **Handles Writes Perfectly:** (Meets Requirement) Write operations are secured by the same mechanism.
 - **Auditable:** Vault audit logs will show the specific K8s SA (via the kubernetes auth method) that performed every action.
-- **No Secret Storage in etcd:** Secrets are fetched "just-in-time."
+- **No Secret Storage in etcd:** Secrets are fetched "just-in-time".
 - **Resource Efficient:** The proxy logic is centralized. A small number of broker pods (e.g., a 3-replica Deployment) can serve requests from hundreds of service pods.
 
 **Cons:**
@@ -83,17 +83,17 @@ sequenceDiagram
 ```mermaid
 graph TD
     subgraph "Helm Chart (tokenizer-dp)"
-        A[1. Deploy: TokenizerSecretRequest CR<br/>(spec: path='kv/data-plane/db')] --> B((tokenizer-dp NS))
+        A["1. Deploy: TokenizerSecretRequest CR<br/>spec: path='kv/data-plane/db'"] --> B((tokenizer-dp NS))
         B --> C[3. Deploy: Tokenizer Pod]
-        C -- mounts --> D[4. K8s Secret<br/>(name: db-creds)]
+        C -- mounts --> D["4. K8s Secret<br/>name: db-creds"]
     end
 
     subgraph "secrets-broker NS"
-        E[Broker Operator Pod<br/>(Controller)]
+        E["Broker Operator Pod<br/>(Controller)"]
     end
 
     subgraph "Hashicorp Vault"
-        F[Vault<br/>(kv/data-plane/db)]
+        F["Vault<br/>(kv/data-plane/db)"]
     end
 
     subgraph "K8s API Server"
@@ -135,21 +135,21 @@ sequenceDiagram
     participant Sidecar as Broker Sidecar
     participant Vault as Hashicorp Vault
 
-    Note over App,Sidecar: App and Sidecar are in the same Pod<br/>(share SA token, network namespace)
+    Note over App,Sidecar: App and Sidecar in same Pod [share SA token]
 
-    App->>+Sidecar: POST http://localhost:8081/write/kv/crypto-gen/new<br/>(Body: ...)
+    App->>+Sidecar: POST http://localhost:8081/write/... (Body: ...)
     
-    Sidecar->>Sidecar: 1. Read shared SA token from disk.
+    Sidecar->>Sidecar: 1. Read shared SA token.
     
-    Sidecar->>+Vault: POST /v1/auth/kubernetes/login<br/>(role: 'crypto-gen', jwt: <pod-sa-token>)
-    Vault-->>-Sidecar: { auth: { client_token: 'vault-pod-token', ... } }
+    Sidecar->>+Vault: POST /v1/auth/kubernetes/login (role: 'crypto-gen', jwt: <pod-sa-token>)
+    Vault-->>-Sidecar: { auth: { client_token: 'vault-pod-token' } }
     
-    Sidecar->>+Vault: POST /v1/kv/crypto-gen/new<br/>(Header: X-Vault-Token: 'vault-pod-token')<br/>(Body: ...)
+    Sidecar->>+Vault: POST /v1/kv/crypto-gen/new (Header: X-Vault-Token)
     
-    Note over Vault: Vault policy (tied to 'crypto-gen' role) permits this write.
+    Note over Vault: Vault policy [tied to role] permits this write.
     
     Vault-->>-Sidecar: { 200 OK }
-    Sidecar-->>-App: { status: "written", path: "..." }
+    Sidecar-->>-App: { status: "written" }
 ```
 
 #### Analysis
@@ -207,6 +207,8 @@ policy:
 - **Deployment:** Must set `serviceAccountName: tokenizer-dp-sa`.
 - **Deployment:** Must mount a projected service account token:
 
+**deployment.yaml:**
+
 ```yaml
 volumes:
   - name: vault-sa-token
@@ -226,6 +228,8 @@ containers:
 ```
 
 - **Deployment:** Must inject the broker URL and token path as env vars:
+
+**deployment.yaml:**
 
 ```yaml
 env:
